@@ -1,93 +1,144 @@
-import socket
-import threading
+import socket  # Importe le module socket pour gérer les connexions réseau
+import select  # Importe le module select pour la gestion des opérations d'I/O multiplexées
+import threading  # Importe le module threading pour prendre en charge le multithreading
 
-class ChatServer:
+class RPSGameServer:
     def __init__(self, host, port):
-        self.HOST = host
-        self.PORT = port
-        self.clients = {}
-        self.server_socket = None
-
-    def __enter__(self):
+        # Initialise la classe RPSGameServer avec l'hôte et le port spécifiés
+        self.HOST = host  # Stocke l'adresse IP de l'hôte
+        self.PORT = port  # Stocke le numéro de port du serveur
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.bind((self.HOST, self.PORT))
-        self.server_socket.listen()
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.server_socket.close()
+        # Crée un socket pour le serveur en utilisant IPv4 et TCP
+        self.connected_clients = {}  
+        # Dictionnaire pour stocker les clients connectés (numéro du joueur, socket et nom du client)
+        self.socket_list = [self.server_socket]  
+        # Liste des sockets à surveiller (inclut le socket du serveur)
 
     def start(self):
         try:
-            print("Server is listening for connections...\n")
+            # Liaison du socket du serveur à l'adresse et au port spécifiés
+            self.server_socket.bind((self.HOST, self.PORT))
+            # Le serveur écoute les connexions entrantes avec une file d'attente de 2 clients
+            self.server_socket.listen(2)
+            print(f"Serveur en attente de connexions sur {self.HOST}:{self.PORT}")
+
             while True:
-                client_socket, addr = self.server_socket.accept()
+                # Utilisation de select pour surveiller les sockets prêts en lecture
+                read_list, _, _ = select.select(self.socket_list, [], [])
 
-                # Ask the client to provide a name
-                client_name = client_socket.recv(1024).decode('utf-8')
-                print(f"Connection established from {addr} with the name {client_name}.\n")
-                self.clients[client_name] = client_socket
+                for sock in read_list:
+                    if sock == self.server_socket:
+                        # Nouvelle connexion entrante
+                        client, address = self.server_socket.accept()
+                        self.socket_list.append(client)
 
-                client_thread = threading.Thread(target=self.handle_client, args=(client_socket, client_name))
-                client_thread.start()
-        except KeyboardInterrupt:
-            print("Server is shutting down.")
+                        # Attribution d'un numéro au joueur et réception du nom du client
+                        player_num = len(self.connected_clients) + 1
+                        client_name = client.recv(1024).decode('utf-8')
+                        self.connected_clients[player_num] = (client, client_name)
 
-    def broadcast(self, message, sender_name):
-        for name, socket in self.clients.items():
-            if name != sender_name:
-                try:
-                    socket.send(message.encode('utf-8'))
-                except Exception as e:
-                    print(f"Error broadcasting message: {e}")
+                        print(f"Joueur {player_num} connecté en tant que {client_name} depuis {address}\n")
 
-    def handle_game(self, client_name):
+                        # Démarrage du jeu lorsque deux joueurs sont connectés
+                        if player_num == 1:
+                            print("En attente du Joueur 2 pour se connecter...\n")
+                        elif player_num == 2:
+                            print("Les deux joueurs sont connectés. Démarrage du jeu...\n")
+                            # Création d'un thread pour gérer le jeu avec les deux joueurs connectés
+                            game_thread = threading.Thread(target=self.handle_game, args=(self.connected_clients[1], self.connected_clients[2]))
+                            game_thread.start()
+
+                    else:
+                        pass  # Les actions pour les sockets clients sont gérées dans la méthode handle_game
+
+        except Exception as e:
+            print(f"Erreur : {e}")
+
+
+    def send_to_player(self, player_num, message):
+        # Envoie un message à un joueur spécifié
+        player_socket, _ = self.connected_clients[player_num]  # Obtient le socket du joueur spécifié
         try:
-            welcome_message = f"Welcome to the game, {client_name}! Please choose Rock, Paper, Scissors, or type 'quit' to exit the game.\n"
-            self.clients[client_name].send(welcome_message.encode('utf-8'))
+            player_socket.send(message.encode("utf-8"))  # Envoie le message encodé en UTF-8 au joueur
+        except Exception as e:
+            # Gestion des erreurs en cas d'échec de l'envoi du message au joueur
+            print(f"Erreur lors de l'envoi du message au Joueur {player_num}: {e}")
 
-            choices = ["Rock", "Paper", "Scissors"]
 
-            # Wait for both players to make a choice
-            choices_made = {}
-            while len(choices_made) < 2:
-                data = self.clients[client_name].recv(1024).decode('utf-8')
-                if data.lower() == 'quit':
+    def handle_game(self, player1, player2):
+        # Initialisation des variables pour contrôler le déroulement du jeu
+        continue_playing = True
+        p1_pass, p2_pass = False, False
+        choices = ["rock", "paper", "scissors"]
+
+        while continue_playing:
+            p1_pass, p2_pass = False, False
+
+            # Envoi des instructions aux joueurs
+            self.send_to_player(1, "Bienvenue dans le jeu Pierre-Papier-Ciseaux ! Entrez votre choix (rock, paper, scissors ou quit):")
+            self.send_to_player(2, "En attente que le Joueur 1 fasse un choix...\n")
+
+            # Attente du choix du Joueur 1
+            while not p1_pass:
+                choice_player1 = player1[0].recv(1024).decode("utf-8")
+                if choice_player1.lower() in choices:
+                    p1_pass = True
+                elif choice_player1.lower().strip() == "quit":
                     break
-                elif data in choices and client_name not in choices_made:
-                    choices_made[client_name] = data
-                    self.broadcast(f"{client_name} has chosen {data}", client_name)
+                else:
+                    self.send_to_player(1, "Choix invalide. Entrez votre choix (rock, paper, scissors ou quit):\n")
 
-            if len(choices_made) == 2:
-                # Determine the winner
-                player1, choice1 = choices_made.items()[0]
-                player2, choice2 = choices_made.items()[1]
-                result = self.determine_winner(choice1, choice2)
-                self.broadcast(f"The result is: {result}", client_name)
+            # Envoi des instructions aux joueurs
+            self.send_to_player(2, "Bienvenue dans le jeu Pierre-Papier-Ciseaux ! Entrez votre choix (rock, paper, scissors ou quit):")
+            self.send_to_player(1, "En attente que le Joueur 2 fasse un choix...\n")
 
-        except Exception as e:
-            print(f"Error handling game for {client_name}: {e}")
+            # Attente du choix du Joueur 2
+            while not p2_pass:
+                choice_player2 = player2[0].recv(1024).decode("utf-8")
+                if choice_player2.lower() in choices:
+                    p2_pass = True
+                elif choice_player2.lower().strip() == "quit":
+                    break
+                else:
+                    self.send_to_player(2, "Choix invalide. Entrez votre choix (rock, paper, scissors ou quit):\n")
 
-    def determine_winner(self, player1, player2):
-        if player1 == player2:
-            return "It's a tie!"
-        elif (player1 == "Rock" and player2 == "Scissors") or \
-             (player1 == "Paper" and player2 == "Rock") or \
-             (player1 == "Scissors" and player2 == "Paper"):
-            return f"{player1} wins!"
-        else:
-            return f"{player2} wins!"
+            # Vérification des choix et détermination du gagnant
+            if "quit" in [choice_player1.lower(), choice_player2.lower()]:
+                break
 
-    def handle_client(self, client_socket, client_name):
-        try:
-            self.handle_game(client_name)
-        except Exception as e:
-            print(f"Error handling client {client_name}: {e}")
-        finally:
-            client_socket.close()
-            del self.clients[client_name]
-            print(f"Connection with {client_name} closed.")
+            self.send_to_player(1, f"Joueur 1 a choisi: {choice_player1}\n")
+            self.send_to_player(2, f"Joueur 2 a choisi: {choice_player2}\n")
+
+            if choice_player1.lower() == choice_player2.lower():
+                # Les joueurs ont fait le même choix, c'est une égalité
+                self.send_to_player(1, "C'est une égalité !")
+                self.send_to_player(2, "C'est une égalité !")
+            elif (choice_player1.lower() == "rock" and choice_player2.lower() == "scissors") or \
+                (choice_player1.lower() == "paper" and choice_player2.lower() == "rock") or \
+                (choice_player1.lower() == "scissors" and choice_player2.lower() == "paper"):
+                # Joueur 1 gagne avec des combinaisons spécifiques de choix
+                self.send_to_player(1, "Joueur 1 gagne !\n")
+                self.send_to_player(2, "Joueur 1 gagne !\n")
+            else:
+                # Joueur 2 gagne
+                self.send_to_player(1, "Joueur 2 gagne !\n")
+                self.send_to_player(2, "Joueur 2 gagne !\n")
+
+            # Demande aux joueurs s'ils veulent rejouer
+            self.send_to_player(1, "Fin du jeu. Merci d'avoir joué ! (si vous voulez rejouer, entrez 'again')\n")
+            self.send_to_player(2, "Fin du jeu. Merci d'avoir joué ! (si vous voulez rejouer, entrez 'again')\n")
+
+            p1_again = player1[0].recv(1024).decode("utf-8")
+            p2_again = player2[0].recv(1024).decode("utf-8")
+
+            # Vérification si les deux joueurs veulent rejouer
+            if p1_again.lower() == "again" and p2_again.lower() == "again":
+                continue_playing = True
+            else:
+                continue_playing = False
+
 
 if __name__ == "__main__":
-    with ChatServer('127.0.0.1', 9001) as chat_server:
-        chat_server.start()
+    # Création d'une instance de RPSGameServer et démarrage du serveur
+    game_server = RPSGameServer('127.0.0.1', 9001)
+    game_server.start()
